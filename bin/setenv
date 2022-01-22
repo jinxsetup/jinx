@@ -1,0 +1,261 @@
+#!/bin/bash
+
+# setenv (c) by Frederic Ruget (fred@atlant.is)
+# 
+# This work is licensed under a
+# Creative Commons Attribution 4.0 International License.
+# 
+# You should have received a copy of the license along with this
+# work. If not, see <http://creativecommons.org/licenses/by/4.0/>.
+
+
+if [ "${0}" = "${BASH_SOURCE}" ]; then
+  echo "Script $(basename "$BASH_SOURCE") is meant to be sourced"
+  exit 1
+fi
+set -o pipefail
+
+# -- Online help --------------------------------------------------------------
+
+if [ "$1" = "-b" -o "$1" = "--help" ]; then
+        man -P ul /dev/stdin <<< $(cat <<EOF
+.TH SOURCE-ENV 1 2022-01-16 "Jinx Setup Tools" "JINX SETUP TOOLS"
+.SH NAME
+.B $(basename "$BASH_SOURCE")
+- set environment for Jinx
+
+.SH SYNOPSIS
+.B $(basename "$BASH_SOURCE")
+[\fIoptions\fR]
+\fIjinx_config_file\fR
+
+.SH DESCRIPTION
+\fB$(basename "$BASH_SOURCE")\fR sets the environment for working
+in the configuration specified by \fIjinx_config_file\fR.
+
+\fB$(basename "$BASH_SOURCE")\fR:
+.RS
+.IP -
+sets and exports the \fBJINX_ROOT\fR environment variable,
+.IP -
+sets and exports the \fBJINX_CONFIG\fR environment variable,
+.IP -
+updates the \fBPATH\fR environment variable,
+.IP -
+checks the validity of the passphrase stored in the
+\fI~/.ssh/passphrase_setup\fR file in the user's home directory.
+.RE
+
+\fB$(basename "$BASH_SOURCE")\fR must be sourced, not forked.
+
+.SH OPTIONS
+
+.TP
+.B  --help
+.TQ
+.B  -h
+Print a usage message.
+EOF
+    )
+    return 0
+fi
+
+# -- Drop here if we have already run -----------------------------------------
+
+if [ -n "${JINX_ROOT+set}" ]; then return 0; fi
+
+
+# == Utility functions ========================================================
+
+# Cf. https://stackoverflow.com/questions/5947742/how-to-change-the-output-color-of-echo-in-linux
+
+export DFLT=$(tput sgr0)
+export SMBD=$(tput bold)
+export RMBD=$'\e'"[22m"
+export SMUL=$(tput smul)
+export RMUL=$(tput rmul)
+export BLACK=$(tput setaf 0)
+export RED=$(tput setaf 1)
+export GREEN=$(tput setaf 2)
+export YELLOW=$(tput setaf 3)
+export BLUE=$(tput setaf 4)
+export MAGENTA=$(tput setaf 5)
+export CYAN=$(tput setaf 6)
+export WHITE=$(tput setaf 7)
+
+jinxh0 () { echo "$DFLT$GREEN$BOLD${@^^}$DFLT"; }
+export -f jinxh0
+jinxh1 () { echo "$DFLT$GREEN$BOLD${@}$DFLT"; }
+export -f jinxh1
+jinxh2 () { echo "$DFLT$GREEN${@}$DFLT"; }
+export -f jinxh2
+jinxnotice () { echo "$DFLT$BLUE$BOLD${@}$DFLT"; }
+export -f jinxnotice
+jinxerror () { echo "$DFLT$RED$BOLD${@}$DFLT"; }
+export -f jinxerror
+
+
+jinxpatch () {
+    local _sudo=""
+    if [ "$1" == "--sudo" ]; then _sudo=sudo; shift; fi
+    if [ "$1" == "--reverse" ]; then _reverse=reverse; shift; fi
+    local file="$1"
+    local delta="$2"
+
+    if [ -z "$_reverse" ]; then
+        echo "$delta" | $_sudo patch --dry-run --quiet --force --reverse $file > /dev/null
+        if [ $? = 0 ]; then return 0; fi
+        echo "$delta" | $_sudo patch --unified --forward --backup-if-mismatch $file
+    else
+        echo "$delta" | $_sudo patch --dry-run --quiet --forward $file > /dev/null
+        if [ $? = 0 ]; then return 0; fi
+        echo "$delta" | $_sudo patch --unified --force --reverse --backup-if-mismatch $file
+    fi
+    local errno=$?
+    if [ $errno != 0 ]; then
+        jinxerror "Cannot patch $file" >&2
+        return 1
+    else
+        return 0
+    fi
+
+    # Note: smartpatch assumes that the delta information has been computed with:
+    # LC_ALL=C TZ=UTC0 diff --new-file --text --unified orig-file new-file
+}
+export -f jinxpatch
+
+
+jinxglo () {
+    cat "$JINX_CONFIG"
+}
+export -f jinxglo
+
+jinxtog () {
+    sponge "$JINX_CONFIG"
+}
+export -f jinxtog
+
+jinxe() {
+    "$JINX_ROOT/bin/jinxe" "$@"
+}
+export -f jinxe
+
+jinxd() {
+    "$JINX_ROOT/bin/jinxd" "$@"
+}
+export -f jinxd
+
+
+# == Main =====================================================================
+
+jinxmain () {
+
+    jinxh0 "Configuring for user $USER..."
+
+    # -- Check passphrase -----------------------------------------------------
+    jinxh1 "Checking passphrase..."
+
+    local res_idx=$( jinxglo | jq "[ .identities[] | .name == \"$USER\" ] | index(true)" )
+    if [ "$res_idx" = null ]; then
+        jinxerror "Error: identity $USER is unknown in $JINX_CONFIG"
+        return 1
+    fi
+    local asc=$(jinxglo | jq -r ".identities[$res_idx].key_material ")
+
+    local passfile="$HOME/.ssh/$( jinxglo | jq -r ".passphrase_file" )"
+    local passphrase
+    if [ ! -f "$passfile" ]; then
+        jinxh1 "Creating passphrase file $SMUL$passfile$RMUL..."
+        passphrase="$( $JINX_ROOT/lib/getpin passphrase "passphrase for $JINX_ROOT" )"
+        if [ "${passphrase::1}" != "P" ]; then
+            jinxnotice "Operation cancelled."
+            return 1
+        fi
+        passphrase="${passphrase:1}"
+        (umask 077 && mkdir -p $(dirname "$passfile"))
+        (umask 077 && touch "$passfile")
+        echo "$passphrase" > "$passfile"
+    fi
+    
+    while true; do
+        if (echo -n "$asc" | base64 -d | gpg --decrypt --batch --yes --passphrase-file "$passfile" --output /dev/null 2>/dev/null); then break; fi
+        jinxerror "Error: invalid passphrase!"
+        passphrase="$( $JINX_ROOT/lib/getpin passphrase "passphrase for $JINX_ROOT" invalid )"
+        if [ "${passphrase::1}" != "P" ]; then
+            jinxnotice "Operation cancelled."
+            return 1
+        fi
+        passphrase="${passphrase:1}"
+        echo "$passphrase" > "$passfile"
+    done
+    if [ -n "$passphrase" ]; then
+        jinxnotice "Passphrase has been saved in $SMUL$passfile$RMUL."
+    fi
+
+    # -- Patch bash_profile ---------------------------------------------------
+
+    jinxh1 "Updating bash_profile..."
+
+    local jinx_in="\
+# --> Jinx configuration ------------------------------------------------------"
+    local jinx_cf="\
+echo -n # Nothing to tell..."
+    local jinx_ou="\
+# <-- Jinx configuration ------------------------------------------------------"
+    local bash_profile="$HOME/.bash_profile"
+    local orig=$(cat $bash_profile)
+    if grep -q "$jinx_in" /dev/stdin <<< "$orig"; then
+        perl -i -pe "BEGIN { undef \$/; binmode STDIN, \":encoding(UTF-8)\"; binmode STDOUT, \":encoding(UTF-8)\"; } s/\n$jinx_in.*\n$jinx_ou/\n$jinx_in\n$jinx_ou/smg" "$bash_profile" 
+    else
+        echo $'\n'"$jinx_in"$'\n'"$jinx_ou" >> "$bash_profile"
+    fi
+    perl -i -pe "BEGIN { undef \$/; binmode STDIN, \":encoding(UTF-8)\"; binmode STDOUT, \":encoding(UTF-8)\"; } s|\n$jinx_in\n$jinx_ou|\n$jinx_in\n$jinx_cf\n$jinx_ou|smg" "$bash_profile" 
+    local delta=$(LC_ALL=C TZ=UTC0 diff --new-file --text --unified /dev/stdin "$bash_profile" <<< "$orig")
+    if [ -z "$delta" ]; then
+        jinxnotice "No need to update bash profile."
+    else
+        jinxnotice "Bash profile was patched with:"
+        jinxnotice "$delta"
+    fi
+}
+
+
+# == Do it! ===================================================================
+
+JINX_ROOT=$(dirname ${BASH_SOURCE})
+if [ "${JINX_ROOT:0:1}" != "/" ]; then JINX_ROOT="${PWD}/${JINX_ROOT}"; fi
+JINX_ROOT=$( sed 's|^\(.*\)/[^/]*$|\1|' <<< "$JINX_ROOT" )
+export JINX_ROOT
+
+if [ $# != 1 ]; then
+    jinxerror "Error: $SMBD$(basename "$BASH_SOURCE")$RMBD expects exactly one argument!"
+    unset JINX_ROOT
+    return 1
+fi
+if [ "${1::1}" = "/" ]; then
+    JINX_CONFIG="$1"
+else
+    JINX_CONFIG="$PWD/$1"
+fi
+if [ ! -f "$JINX_CONFIG" ]; then
+    jinxerror "Error: File ${SMUL}$0${RMUL} not found!"
+    unset JINX_ROOT
+    unset JINX_CONFIG
+    return 1
+fi
+export JINX_CONFIG
+
+jinxmain
+
+if [ $? = 0 ]; then
+    if ! grep -q ":$JINX_ROOT/bin" /dev/stdin <<< "$PATH"; then
+        PATH="$PATH:$JINX_ROOT/bin"
+    fi
+    unset jinxmain
+    return 0
+else
+    unset JINX_ROOT
+    unset JINX_CONFIG
+    unset jinxmain
+    return 1
+fi
