@@ -1,0 +1,131 @@
+#!/usr/bin/perl -w
+#   Copyright 2022 Frederic Ruget
+#   Copyright 2014 Daniel Jay Haskin.
+#
+#   This program is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# See https://github.com/djhaskin987/lukspinentry
+
+# SYNOPSYS
+#    getpin SECRET PROMPT
+#    getpin SECRET PROMPT invalid
+#    getpin SECRET PROMPT confirm
+#
+# EXAMPLE
+#     getpin password "password for user" confirm
+
+use strict;
+use utf8;
+use FileHandle;
+use IPC::Open2;
+use Env qw( LC_CTYPE DISPLAY SSH_TTY );
+
+my $secret = shift(@ARGV);
+my $prompt = shift(@ARGV);
+my $arg = shift(@ARGV);
+
+# open pinentry
+my $pid = "";
+if ( defined($DISPLAY) && !defined($SSH_TTY) ) {
+	$pid = open2(*IN, *OUT, "pinentry-x11 -g") || die;
+} else {
+	# get a tty
+	open F, "tty |" || die ("can't fork to tty");
+	my $tty = <F>;
+	close F;
+	$pid = open2(*IN, *OUT, "pinentry-curses --ttyname $tty") || die;
+}
+
+my $lctype = "en_US.UTF-8";
+if ( defined($LC_CTYPE) ) {
+	$lctype = $LC_CTYPE;
+}
+
+
+while ( <IN> ) {
+    if ( /(.*)/ ) {
+		#print STDERR "LAUNCH -> $1\n";
+        last;
+    }
+}
+
+print OUT "OPTION lc-ctype=$lctype\n";
+while ( <IN> ) {
+    if ( /(.*)/ ) {
+		#print STDERR "OPTION -> $1\n";
+        last;
+    }
+}
+
+############################################################################
+sub getpass($) {
+	my $prompt = shift;
+    my $res = "";
+#	print OUT "SETDESC LUKS Passphrase\nSETPROMPT $prompt\nGETPIN\n";
+    print OUT "SETPROMPT $prompt\n";
+    while ( <IN> ) {
+        if ( /(.*)/ ) {
+            #print STDERR "SETPROMPT -> $1\n";
+            last;
+        }
+    }
+    print OUT "GETPIN\n";
+	while ( <IN> ) {
+		if ( /^OK/ ) {
+            #print STDERR "GETPIN -> \n";
+            return "P" . $res;
+		} elsif ( /^ERR [0-9]* Operation cancelled <Pinentry>/ ) {
+			return "C";
+		} elsif ( /^ERR \d+ (.*)/ ) {
+			#print STDERR $1."\n";
+			exit 4;
+		} elsif ( /^D (.*)/ ) {
+			#print STDERR "GETPIN -> $1\n";
+			$res = $1;
+		}
+	}
+}
+
+if ( defined($arg) &&  $arg eq "invalid" ) {
+	print OUT "SETERROR Invalid $secret, try again\n";
+    while ( <IN> ) {
+        if ( /(.*)/ ) {
+            #print STDERR "SETERROR -> $1\n";
+            last;
+        }
+    }
+}
+
+my $p = getpass("Enter $prompt");
+if ( defined($arg) &&  $arg eq "confirm" ) {
+	while ( $p ne getpass("Confirm $prompt") ) {
+		print OUT "SETDESC Keyboard inputs do not match\n";
+        while ( <IN> ) {
+            if ( /(.*)/ ) {
+                #print STDERR "SETDESC -> $1\n";
+                last;
+            }
+        }
+		print OUT "MESSAGE\n";
+        while ( <IN> ) {
+            if ( /(.*)/ ) {
+                #print STDERR "MESSAGE -> $1\n";
+                last;
+            }
+        }
+		$p = getpass("Re-Enter $secret");
+	}
+}
+
+print "$p";
