@@ -1,0 +1,450 @@
+#!/bin/bash
+
+# jinx-instantiate (c) by Frederic Ruget (fred@atlant.is)
+# 
+# This work is licensed under a
+# Creative Commons Attribution 4.0 International License.
+# 
+# You should have received a copy of the license along with this
+# work. If not, see <http://creativecommons.org/licenses/by/4.0/>.
+
+# == Check we are correctly invoked and set env ==============================
+
+if [ "${0}" != "${BASH_SOURCE}" ]; then
+  echo "Script $(basename "$BASH_SOURCE") is not meant to be sourced"
+  return 1
+fi
+source "$(dirname "$BASH_SOURCE")/setenv"
+set -e
+
+
+# == Utilities ================================================================
+
+# -- Generate a host key pair -------------------------------------------------
+
+gen-keypair () {
+    # .. Arguments ............................................................
+    local host=$1
+    local algo=$2
+
+    # .. Exceptions ...........................................................
+    local tmpdir
+    trap '{
+        local errno=$?;
+        if [ -n "$tmpdir" ]; then rm -rf "$tmpdir"; fi;
+        return $errno;
+    }' ERR EXIT SIGINT SIGTERM
+
+    # .. Body .................................................................
+
+    # Create a pair of asymmetric keys
+    local keys
+    local tmpdir="$(mktemp -d)"
+    mkfifo $tmpdir/key $tmpdir/key.pub
+    case "$algo" in
+    dsa|ecdsa|ed25519)
+        keys=$(cat $tmpdir/key $tmpdir/key.pub & ssh-keygen -q -N "" -t $algo -f $tmpdir/key \
+            <<<y >/dev/null 2>&1)
+        ;;
+    rsa)
+        keys=$(cat $tmpdir/key $tmpdir/key.pub & ssh-keygen -q -N "" -t "$algo" -b 4096 -f $tmpdir/key \
+            <<<y >/dev/null 2>&1)
+        ;;
+    esac
+
+    # Encrypt the pair of asymmetric keys and package it as a json object
+    local key=$(echo "$keys" | head -n -1 | jinxe | base64 -w 0)
+    local pubkey=$(echo "$keys" | tail -1 | jinxe | base64 -w 0)
+    echo "{\"algo\": \"$algo\", \"key\": \"$key\", \"pubkey\": \"$pubkey\"}"
+
+    rm -rf "$tmpdir"
+}
+
+# == Clothes and patches ======================================================
+
+user-data-cloth () {
+    local subhost="$1"
+
+    # -- Initialize cloud.cfg -------------------------------------------------
+    local hostidx=$( jinxglo | jq "[ .hosts[] | .name == \"$subhost\" ] | index(true)" )
+    local HOSTNAME=$( jinxglo | jq -r ".hosts[$hostidx].fqdn" )
+    local USERNAME=$( jinxglo | jq -r ".hosts[$hostidx].admin_name" )
+    local REALNAME=$( jinxglo | jq -r ".hosts[$hostidx].admin_fullname" )
+    local PASSWORD="$( jinxglo | jq -r ".hosts[$hostidx].admin_password" )"
+    if [ -z "$PASSWORD" ]; then
+        PASSWORD="$( get-pin password "password for $USERNAME@$subhost" confirm )"
+        PASSWORD="$( echo -n $PASSWORD | jinxe | base64 -w 0 )"
+        jinxglo | jq ".hosts[$hostidx].admin_password = \"$PASSWORD\"" | jinxtog
+    fi
+    PASSWORD="$( echo "$PASSWORD" | base64 -d | jinxd \
+        | makepasswd --clearfrom=- --crypt-md5 | sed "s/^[^ ]*[ ]*//" )" 
+    local AUTHORIZEDKEY="$( jinxglo | jq -r ".hosts[$hostidx].admin_authorizedkey" | base64 -d | jinxd)"
+    (
+        sed "s|{{{HOSTNAME}}}|$HOSTNAME|g" \
+        | sed "s|{{{USERNAME}}}|$USERNAME|g" \
+        | sed "s|{{{REALNAME}}}|$REALNAME|g" \
+        | sed "s|{{{PASSWORD}}}|$PASSWORD|g" \
+        | sed "s|{{{AUTHORIZEDKEY}}}|$AUTHORIZEDKEY|g"
+    ) <<'EOF'
+#cloud-config
+autoinstall:
+  version: 1
+
+  identity:
+    hostname: "{{{HOSTNAME}}}"
+    username: "{{{USERNAME}}}"
+    realname: "{{{REALNAME}}}"
+    password: "{{{PASSWORD}}}"
+
+  ssh:
+    authorized-keys:
+      - {{{AUTHORIZEDKEY}}}
+    install-server: true
+    allow-pw: no
+
+  keyboard: {layout: fr, variant: ''}
+  locale: en_US.UTF-8
+
+  late-commands:
+    - echo                                                  >> /target/etc/cloud/cloud.cfg
+    - echo "# Added by Jinx setup"                          >> /target/etc/cloud/cloud.cfg
+    - echo                                                  >> /target/etc/cloud/cloud.cfg
+    - echo "ssh_deletekeys:"" true"                         >> /target/etc/cloud/cloud.cfg
+    - echo "ssh_keys:"                                      >> /target/etc/cloud/cloud.cfg
+EOF
+# https://readthedocs.org/projects/cloudinit/downloads/pdf/stable/
+
+    # -- Add host keys configuration to cloud.cfg -----------------------------
+    for ALGO in dsa ecdsa ed25519 rsa; do
+        local keyidx=$( jinxglo | jq "[ .hosts[$hostidx].hostkeys[] | .algo == \"$ALGO\" ] | index(true)" )
+        if [ "$keyidx" != null ]; then
+#            (
+#                sed "s|{{{ALGO}}}|$ALGO|g"
+#            ) <<'EOF'
+#    - rm -f /target/etc/ssh/ssh_host_{{{ALGO}}}_key
+#    - rm -f /target/etc/ssh/ssh_host_{{{ALGO}}}_key.pub
+#EOF
+#        else
+            local key="$( jinxglo | jq ".hosts[$hostidx].hostkeys[$keyidx]" )"
+            if [ "$( jq .key <<< "$key" )" = null ]; then
+                jinxh2 "Creating $ALGO hostkeys for $subhost in $JINX_CONFIG..." >&2
+                key="$( gen-keypair "$subhost" $ALGO)"
+                jinxglo | jq ".hosts[$hostidx].hostkeys[$keyidx] = $key" | jinxtog
+            else
+                jinxnotice "$ALGO hostkeys for $subhost is present in $JINX_CONFIG." >&2
+            fi
+            (
+                sed "s|{{{ALGO}}}|$ALGO|g" \
+                | sed "s|{{{PRIVKEY}}}|$( jq -r .key <<< "$key" | base64 -d | jinxd \
+                    | sed "s/^/        /" | base64 -w 0 )|g" \
+                | sed "s|{{{PUBKEY}}}|$( jq -r .pubkey <<< "$key" | base64 -d | jinxd)|g"
+            ) <<'EOF'
+    - echo "    {{{ALGO}}}_private:"" |"                    >> /target/etc/cloud/cloud.cfg
+    - echo "{{{PRIVKEY}}}" | base64 -d                      >> /target/etc/cloud/cloud.cfg
+    - echo "    {{{ALGO}}}_public:"" {{{PUBKEY}}}"          >> /target/etc/cloud/cloud.cfg
+EOF
+
+#            (
+#                sed "s|{{{ALGO}}}|$ALGO|g" \
+#                | sed "s|{{{PRIVKEY}}}|$( jq -r .key <<< "$key" | base64 -d | jinxd | base64 -w 0 )|g" \
+#                | sed "s|{{{PUBKEY}}}|$( jq -r .pubkey <<< "$key" | base64 -d | jinxd | base64 -w 0 )|g"
+#            ) <<'EOF'
+#    - echo "{{{PRIVKEY}}}" | base64 -d > /target/etc/ssh/ssh_host_{{{ALGO}}}_key
+#    - chmod 600 /target/etc/ssh/ssh_host_{{{ALGO}}}_key
+#    - echo "{{{PUBKEY}}}" | base64 -d > /target/etc/ssh/ssh_host_{{{ALGO}}}_key.pub
+#    - chmod 644 /target/etc/ssh/ssh_host_{{{ALGO}}}_key.pub
+#EOF
+        fi
+    done
+}
+export -f user-data-cloth
+
+
+# == For the record ==========================================================
+
+# Use:
+#   - `virsh list --all` to list virtual machines
+#   - `virsh destroy kolab` to destroh machine 'kolab'
+#   - `virsh undefine kolab` to remove machine 'kolab' from kvm framework
+#   - `virsh console kolab` to open a console onto machine 'kolab'
+#   - `lsb_release -a` to know the install ubuntu version
+#
+# Use 'CTRL-OPTION-6' to quit console
+#
+# Info on VM snapshots: https://www.linuxtechi.com/create-revert-delete-kvm-virtual-machine-snapshot-virsh-command/
+
+# == Main ====================================================================
+
+cleanup () {
+    # Parameters
+    local ufw_rule="$1"
+    local python_pid="$2"
+    local python_cmd="$3"
+    local stddir="$4"
+    
+    set +x
+    if [ -n "$ufw_rule" ]; then
+        jinxh2 "Closing ingress path for serving ISO file"
+        set -x
+        sudo ufw delete $ufw_rule
+        set +x
+    fi
+    if [ -n "$python_pid" ]; then
+        if ps -edalf \
+            | egrep "^\w +\w +\w+ +$python_pid " \
+            | grep -q "$python_cmd"; then
+            jinxh1 "Shutting down HTTP server..."
+            kill "$python_pid" || true
+        fi
+    fi
+    if [ -n "$stddir" -a -d "$stddir" ]; then
+        rm -f "$stddir/fd1" "$stddir/fd2"
+        rmdir "$stddir"
+    fi 
+}
+
+main () {
+    local ufw_rule python_pid python_cmd stddir
+    trap '{ local errno=$?;
+            jinxerror "ERROR ($errno) ${BASH_SOURCE}:${LINENO}" >&2;
+            cleanup "$ufw_rule" "$python_pid" "$python_cmd" "$stddir";
+            trap - ERR;
+            trap - EXIT;
+            trap - SIGINT;
+            trap - TERM;
+            return $errno;
+        }' ERR
+    trap '{ local errno=$?;
+            cleanup "$ufw_rule" "$python_pid" "$python_cmd" "$stddir";
+            trap - ERR;
+            trap - EXIT;
+            trap - SIGINT;
+            trap - TERM;
+            return $errno;
+        }' EXIT SIGINT SIGTERM
+    
+    # -- Ingestion of command line arguments ----------------------------------
+
+    local _help _verbose _bash
+    local _args=()
+    while (( "$#" )); do
+        case "$1" in
+        --bash)
+            _bash=
+            shift
+            ;;
+        -h|--help)
+            _help=
+            shift
+            ;;
+        -[^-]*|--?*) # unsupported flags
+            echo "Error: Unsupported flag $1" >&2
+            return 1
+            ;;
+        *) # preserve positional arguments
+            args+=("$1")
+            shift
+            ;;
+        esac
+    done
+    # Args cheatsheet...
+    # args=(a "b c")
+    # echo ${args[@]}   --> a b c
+    # echo ${#args[@]}  --> 2
+    # echo ${!args[@]}  --> 0 1
+    # echo ${args[1]}   --> b c
+    # for i in ${!args[@]}; do echo -n "${args[$i]}-"; done --> a-b c-
+
+    # -- For debug only... ----------------------------------------------------
+
+    if [ -n "${_bash+set}" ]; then
+        bash --init-file <(echo "PS1='debug$ '")
+        return 0
+    fi
+
+    # -- Online help ----------------------------------------------------------
+
+    if [ -n "${_help+set}" ]; then
+        man -P ul /dev/stdin <<< $(cat <<EOF
+.TH $(basename "$BASH_SOURCE" | awk '{ print toupper($0) }') 1 2022-01-17 "Jinx Setup Tools" "JINX SETUP TOOLS"
+.SH NAME
+.B $(basename "$BASH_SOURCE")
+- spin off virtual machine instances
+
+.SH SYNOPSIS
+.B $(basename "$BASH_SOURCE")
+[\fIoptions\fR]
+[\fIhostnames\fR]
+
+.SH DESCRIPTION
+\fB$(basename "$BASH_SOURCE")\fR spins off a virtual machine instance
+for each host name in \fIhostnames\fR.
+The characteristics of the hosts are specified in the
+\fI\$JINX_CONFIG\fR configuration file.
+
+.SH OPTIONS
+
+.TP
+.B  --help
+.TQ
+.B  -h
+Print a usage message.
+EOF
+        )
+        return 0
+    fi
+
+    # -- Main body ------------------------------------------------------------
+    local idx
+    for idx in ${!args[@]}; do 
+        local subhost="${args[$idx]}"
+
+        jinxh0
+        jinxh0 "Creating host $subhost..."
+
+        # -- Check validity of subhost ----------------------------------------
+        local hostidx=$( jinxglo | jq "[ .hosts[] | .name == \"$subhost\" ] | index(true)" )
+        if [ "$hostidx" = null ]; then
+            jinxerror "Error: host $subhost is unknown in $JINX_CONFIG"
+            exit 1
+        fi
+
+        # -- Perform unattended installation with subiquity -------------------
+
+        jinxh1
+        jinxh1 "Performing unattended installation with subiquity..."
+
+        local mac_address=$( jinxglo | jq -r ".hosts[$hostidx].mac_address")
+        # We prepare a cloud-init config for the subhost
+        # This config will be served over http
+        local user_data;
+        user_data=$( user-data-cloth "$subhost" )
+        rm -rf "$JINX_ROOT/hosts/$subhost/netboot"
+
+        (
+            umask 077
+            mkdir -p "$JINX_ROOT/hosts/$subhost/netboot"
+            touch "$JINX_ROOT/hosts/$subhost/netboot/meta-data"
+            touch "$JINX_ROOT/hosts/$subhost/netboot/vendor-data"
+            touch "$JINX_ROOT/hosts/$subhost/netboot/user-data"
+        )
+        set -x
+        sponge "$JINX_ROOT/hosts/$subhost/netboot/user-data" <<< "$( echo "$user_data" )"
+        set +x
+
+        local vm_ram=$( jinxglo | jq -r ".hosts[$hostidx].ram")
+        local vm_disk=$( jinxglo | jq -r ".hosts[$hostidx].disk")
+        local vm_vcpus=$( jinxglo | jq -r ".hosts[$hostidx].vcpus")
+        local vm_iso_url=$( jinxglo | jq -r ".hosts[$hostidx].vm_iso_url")
+        local vm_iso_name=$( basename "$vm_iso_url" )
+        if [ ! -f "$JINX_ROOT/cache/$vm_iso_name" ]; then
+            (
+                umask 077
+                mkdir -p "$JINX_ROOT/cache"
+                jinxh1 "Fetching iso image for VM..."
+                set -x
+                cd "$JINX_ROOT/cache" && wget "$vm_iso_url"
+                set +x
+            )
+        fi
+
+        # -- Launch the HTTP server and spin up the virtual machine -----------
+
+        stddir=$(mktemp -d)
+        touch "$stddir/fd1"
+        touch "$stddir/fd2"
+        local server_ip=$( ifconfig br0 | grep "inet " | sed 's/^.*inet \([0-9.]*\).*$/\1/' )
+        jinxnotice "Host IP address is $server_ip"
+        local guest_ip=$( jinxglo | jq -r .hosts[$hostidx].ip_address )
+        jinxh2 "Opening ingress path for serving ISO file"
+        ufw_rule="allow in proto tcp from $guest_ip to $server_ip port 3003"
+        set -x
+        sudo ufw $ufw_rule
+        set +x
+        jinxh1 "Launching HTTP server..."
+        set -x
+        python_cmd="python3 -u -m http.server -d $JINX_ROOT/hosts/$subhost/netboot -b $server_ip 3003"
+        python_pid=$($python_cmd >"$stddir/fd1" 2>"$stddir/fd2" & echo $!)
+        set +x
+        while true; do
+            if [ $(cat "$stddir/fd2" | wc -c) != 0 ]; then
+                unset python_pid
+                cat "$stddir/fd2" >&2
+                ( return 1 )
+            fi
+            if [ $(cat "$stddir/fd1" | wc -c) != 0 ]; then break; fi
+            sleep 1
+        done
+
+        # -- Spin up the virtual machine --------------------------------------
+
+        jinxh1 "Spinning $subhost host up..."
+        set -x
+        virt-install \
+            --name $subhost \
+            --os-type linux --os-variant ubuntu20.04 \
+            --ram $vm_ram \
+            --disk size=$vm_disk \
+            --network network=host-bridge,mac=$mac_address \
+            --graphics none \
+            --vcpus $vm_vcpus \
+            --location "$JINX_ROOT/cache/$vm_iso_name",initrd=casper/initrd,kernel=casper/vmlinuz \
+            --extra-args "console=ttyS0,115200n8 serial autoinstall ds=nocloud-net;s=http://$server_ip:3003/" \
+            --noreboot
+        set +x
+
+        cleanup "$ufw_rule" "$python_pid" "$python_cmd" "$stddir";
+
+        # -- Set autostart if needed ------------------------------------------
+        if [ "$( jinxglo | jq .hosts[$hostidx].autostart )" = true ]; then
+            jinxh1 "Setting autostart for host $subhost..."
+            set -x
+            virsh autostart $subhost
+            set +x
+        fi
+
+        # -- Wait for subhost to start ----------------------------------------
+        jinxh1 "Waiting for host $subhost to start..."
+        set -x
+        virsh start $subhost
+        set +x
+        while ! ssh -o ConnectTimeout=1 $subhost echo -n; do sleep 1; done
+
+        # -- Copy passphrase to subhost ---------------------------------------
+        jinxh1 "Copying passphrase to $subhost..."
+        local remote_user=$( jinxglo | jq -r ".hosts[$hostidx].admin_name" )
+        local passfile="$( jinxglo | jq -r ".passphrase_file" )"
+        set -x
+        ssh "$remote_user@$subhost" "( umask 077; touch .ssh/$passfile )"
+        scp "$HOME/.ssh/$passfile" "$remote_user@$subhost:.ssh/"
+        set +x
+
+        # -- Clone requested repos --------------------------------------------
+        jinxh1 "Cloning requested repos to $subhost..."
+        local jinx_dir=$( jinxglo |  jq -r ".hosts[$hostidx].jinx_dir" )
+        ( umask 077; mkdir -p "$JINX_ROOT/hosts/$subhost/repos" )
+        local repocnt=$( jinxglo |  jq ".hosts[$hostidx].jinx_repos | length" )
+        local repoidx
+        for repoidx in $(seq 0 $((repocnt-1))); do
+            local repourl="$( jinxglo |  jq -r ".hosts[$hostidx].jinx_repos[$repoidx]" )"
+            local reponame="$( basename "$repourl" .git )"
+            set -x
+            ( cd "$JINX_ROOT/hosts/$subhost/repos" && git clone "$repourl" )
+            ssh "$remote_user@$subhost" mkdir -p "$jinx_dir"
+            scp -r "$JINX_ROOT/hosts/$subhost/repos/$reponame" $remote_user@$subhost:$jinx_dir/
+            set +x
+        done
+
+    done
+    trap - ERR;
+    trap - RETURN;
+    trap - EXIT;
+    trap - SIGINT;
+    trap - TERM;
+}
+
+
+# == Do it ===================================================================
+
+sudo echo -n # Make sure we have a fresh sudo
+main "$@"
