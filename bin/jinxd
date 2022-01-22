@@ -1,0 +1,122 @@
+#!/bin/bash
+
+# jinxd (c) by Frederic Ruget (fred@atlant.is)
+# 
+# This work is licensed under a
+# Creative Commons Attribution 4.0 International License.
+# 
+# You should have received a copy of the license along with this
+# work. If not, see <http://creativecommons.org/licenses/by/4.0/>.
+
+
+# == Check we are correctly invoked and set env ==============================
+
+if [ "${0}" != "${BASH_SOURCE}" ]; then
+  echo "Script $(basename "$BASH_SOURCE") is not meant to be sourced"
+  return 1
+fi
+source "$(dirname "$BASH_SOURCE")/setenv"
+set -e
+
+
+# == Parse command line ======================================================
+
+unset F_HELP _sudo _keep
+args=()
+while (( "$#" )); do
+    case "$1" in
+    -h|--help)
+        F_HELP=
+        shift
+        ;;
+    --sudo)
+        _sudo="sudo"
+        shift
+        ;;
+    --keep)
+        _keep="yes"
+        shift
+        ;;
+    -[^-]*|--?*) # unsupported flags
+        echo "Error: Unsupported flag $1" >&2
+        return 1
+        ;;
+    *) # preserve positional arguments
+        args+=("$1")
+        shift
+        ;;
+    esac
+done
+#for i in ${!args[@]}; do echo "${args[i]}"; done
+
+# == Help ====================================================================
+
+if [ ! -z ${F_HELP+is_set} ]; then
+    cat <<EOF
+Usage: $(basename "$BASH_SOURCE") [OPTION]...
+Decrypt an AES-encoded file
+
+  ${bold}-h${norm} or ${bold}--help${norm}
+    Display this help and exit
+EOF
+    exit 0
+fi
+
+
+# == Main ====================================================================
+
+main () {
+    trap '{
+        local errno=$?;
+        trap - ERR;
+        error "ERROR ($errno) ${BASH_SOURCE}:${LINENO}" >&2;
+        return $errno;
+    }' ERR
+
+    local passfile="$HOME/.ssh/$( jinxglo | jq -r ".passphrase_file" )"
+    unset aesfile
+    unset clearfile
+    if [ ${#args[@]} = 1 ]; then
+        if [ "${args[0]}" != "-" ]; then
+            local aesfile="${args[0]}"
+            if ! echo "$aesfile" | grep -q "[.]aes$"; then
+                error "Encrypted file should have suffix .aes"
+                return 1
+            fi
+            clearfile=$(echo "$aesfile" | sed 's/[.]aes$//')
+        fi
+    elif [ ${#args[@]} = 2 ]; then
+        if [ "${args[0]}" != "-" ]; then
+            local aesfile="${args[0]}"
+        fi
+        if [ "${args[1]}" != "-" ]; then
+            local clearfile="${args[1]}"
+        fi
+    elif [ ${#args[@]} != 0 ]; then
+        error "Too many arguments"
+        return 1
+    fi
+    local contents
+    if [ ! -z ${aesfile+is_set} ]; then
+        contents=$($_sudo bash -c "gpg --decrypt --batch --yes --passphrase-file \"$passfile\" \"$aesfile\"" 2>/dev/null | base64 -w 0)
+    else
+        contents=$($_sudo bash -c "gpg --decrypt --batch --yes --passphrase-file \"$passfile\"" 2>/dev/null | base64 -w 0)
+    fi
+
+    if [ ! -z ${clearfile+is_set} ]; then
+        echo "$contents" | base64 -d | $_sudo bash -c "umask 077 && cat > \"$clearfile\""
+    else
+        echo "$contents" | base64 -d
+    fi
+
+    if [ ! -z "${aesfile+is_set}" -a ! -z "${clearfile+is_set}" -a -z "$_keep" ]; then
+        $_sudo rm -f "$aesfile"
+    fi
+
+    return 0
+}
+
+
+# == Do it ===================================================================
+
+main
