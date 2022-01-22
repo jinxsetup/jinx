@@ -1,0 +1,20 @@
+#!/bin/bash
+
+# land-sandbox (c) by Frederic Ruget (fred@atlant.is)
+# 
+# This work is licensed under a
+# Creative Commons Attribution 4.0 International License.
+# 
+# You should have received a copy of the license along with this
+# work. If not, see <http://creativecommons.org/licenses/by/4.0/>.
+
+
+if [ "${0}" = "${BASH_SOURCE}" ]; then
+  echo "Script $(basename "$BASH_SOURCE") is meant to be sourced"
+  exit 1
+fi
+
+jinxroot=$(dirname ${BASH_SOURCE})
+if [ "${jinxroot:0:1}" != "/" ]; then jinxroot="${PWD}/${jinxroot}"; fi
+jinxroot=$( sed 's|^\(.*\)/[^/]*$|\1|' <<< "$jinxroot" )
+source "$jinxroot/bin/setenv" "$jinxroot/glo/jinx.json"
