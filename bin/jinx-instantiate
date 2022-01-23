@@ -14,8 +14,7 @@ if [ "${0}" != "${BASH_SOURCE}" ]; then
   echo "Script $(basename "$BASH_SOURCE") is not meant to be sourced"
   return 1
 fi
-source "$(dirname "$BASH_SOURCE")/setenv"
-set -e
+source "$(dirname "$BASH_SOURCE")/setenv" ""
 
 
 # == Utilities ================================================================
@@ -405,6 +404,7 @@ EOF
 
         # -- Wait for subhost to start ----------------------------------------
         jinxh1 "Waiting for host $subhost to start..."
+        jinx-known-host $subhost
         set -x
         virsh start $subhost
         set +x
@@ -418,6 +418,20 @@ EOF
         ssh "$remote_user@$subhost" "( umask 077; touch .ssh/$passfile )"
         scp "$HOME/.ssh/$passfile" "$remote_user@$subhost:.ssh/"
         set +x
+
+        # -- Update github.com SSH host keys ----------------------------------
+        local github_meta
+        if github_meta="$(curl --connect-timeout 60 https://api.github.com/meta)"; then
+            jinxnotice "Refreshing github.com SSH host keys..."
+            ssh-keygen -q -R "github.com" > /dev/null
+            local metacnt=$( echo "$github_meta" | jq ".ssh_keys | length" )
+            local metaidx
+            for metaidx in $(seq 0 $((metacnt-1))); do
+                local thismeta=$( echo "$github_meta" | jq -r ".ssh_keys[$metaidx] " )
+                ( "$JINX_ROOT/lib/hashssh" github.com && echo " $thismeta" ) \
+                    >> ~/.ssh/known_hosts
+            done
+        fi
 
         # -- Clone requested repos --------------------------------------------
         jinxh1 "Cloning requested repos to $subhost..."
@@ -433,6 +447,7 @@ EOF
             ssh "$remote_user@$subhost" mkdir -p "$jinx_dir"
             scp -r "$JINX_ROOT/hosts/$subhost/repos/$reponame" $remote_user@$subhost:$jinx_dir/
             set +x
+            rm -rf "$JINX_ROOT/hosts/$subhost/repos/$reponame"
         done
 
     done
