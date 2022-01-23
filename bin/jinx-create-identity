@@ -1,0 +1,315 @@
+#!/bin/bash
+
+glo () {
+    cat glo/globals.json
+}
+
+toglo () {
+    sponge glo/globals.json
+}
+
+set -o pipefail
+
+cherr () { # ERRNO LINENO BASH_SOURCE OTHER
+    if [ $1 != 0 ]; then
+        local ERRNO=$1
+        local LINENO=$2
+        local SOURCE="$3"
+        shift 3
+        echo "${bold}${red}ERROR (${ERRNO}) ${SOURCE}:${LINENO} - ${@}${norm}" >&2
+        exit ${ERRNO}
+    fi
+    return 0
+}
+
+main () {
+    trap '{ cherr ${?} ${LINENO} ${BASH_SOURCE}; }' ERR
+
+    local passfile=/$HOME/.ssh/passphrase_setup
+    local name=$1
+
+    # -- Retrieve user full name and email -----------------------------------
+
+    local res_idx res_fullname res_email
+    res_idx=$( glo | jq "[ .identities[] | .name == \"$name\" ] | index(true)" )
+    if [ "$res_idx" = null ]; then
+        echo ".identities[] | select(.name == \"$name\") is empty"
+        (exit 1);
+    fi
+    res_fullname=$( glo | jq ".identities[$res_idx].fullname" )
+    if [ "$res_fullname" = null ]; then
+        echo ".identities[$res_idx].fullname must be specified"
+        (exit 1)
+    else
+        res_fullname=$(jq -r <<< "$res_fullname" )
+    fi
+    res_email=$( glo | jq ".identities[$res_idx].email" )
+    if [ "$res_email" = null ]; then
+        echo ".identities[$res_idx].email must be specified"
+        (exit 1)
+    else
+        res_email=$(jq -r <<< "$res_email" )
+    fi
+
+    # -- Prepare script for master key generation ----------------------------
+
+    local script_genkey=$(
+        ( sed "s|{{{GPG}}}|gpg|g" \
+        | sed "s|{{{PASSFILE}}}|$passfile|g" \
+        | sed "s|{{{FULLNAME}}}|$res_fullname|g" \
+        | sed "s|{{{EMAIL}}}|$res_email|g" \
+        ) <<'EOF'
+set timeout 10
+spawn {{{GPG}}} --command-fd=0 --status-fd=1 --pinentry-mode=loopback --passphrase-file {{{PASSFILE}}} --full-generate-key
+
+# -- Select key kind ---------------------------------------------------------
+
+expect {
+    -re "\\(1\\) RSA and RSA \\(default\\).*GET_LINE keygen.algo.*"
+                                { send -- "1\r" }
+    timeout { send_error "Error: cannot select key of kind (1) RSA and RSA (default)\n"; exit 1 }
+}
+
+# -- Set key size ------------------------------------------------------------
+
+expect {
+    "GET_LINE keygen.size*"     { send -- "3072\r" }
+    timeout { send_error "Error: cannot set key size\n"; exit 2 }
+}
+
+# -- Set key expiration time -------------------------------------------------
+
+expect {
+    "GET_LINE keygen.valid*"     { send -- "1\r" }
+    timeout { send_error "Error: cannot set key expiration time\n"; exit 3 }
+}
+
+# -- Set key uid fullname ----------------------------------------------------
+
+expect {
+    "GET_LINE keygen.name*"    { send -- "{{{FULLNAME}}}\r" }
+    timeout { send_error "Error: cannot set key uid fullname!\n"; exit 4 }
+}
+
+# -- Set key uid email -------------------------------------------------------
+
+expect {
+    "GET_LINE keygen.email*"   { send -- "{{{EMAIL}}}\r" }
+    timeout { send_error "Error: cannot set key uid email!\n"; exit 5 }
+}
+
+# -- Set comment -------------------------------------------------------------
+
+expect {
+    "GET_LINE keygen.comment*"   { send -- "\r" }
+    timeout { send_error "Error: cannot set comment!\n"; exit 6 }
+}
+
+# -- Done! -------------------------------------------------------------------
+
+expect {
+    "KEY_CREATED*"              { }
+    timeout { send_error "Error: unexpected timeout!\n"; exit 7 }
+}
+set returnvalues [wait]
+set exitcode [lindex $returnvalues 3]
+exit $exitcode
+EOF
+    )
+
+    # -- Generate master key -------------------------------------------------
+
+    local res_genkey
+    res_genkey=$(set -x; expect <<< "$script_genkey")
+    echo "$res_genkey"
+
+    local fingerprint=$( echo "$res_genkey" \
+        | grep "KEY_CREATED B" \
+        | sed 's/^.* KEY_CREATED B \([0-9A-F][0-9A-F]*\)[^0-9A-F]*$/\1/')
+    echo Fingerprint is $fingerprint
+
+    glo | jq ".identities[$res_idx].fingerprint = \"$fingerprint\"" | toglo
+
+    # -- Prepare script for subkey generation --------------------------------
+
+    local script_gensubkey=$(
+        ( sed "s|{{{GPG}}}|gpg|g" \
+        | sed "s|{{{PASSFILE}}}|$passfile|g" \
+        | sed "s|{{{KEY}}}|$fingerprint|g" \
+        ) <<'EOF'
+set timeout 10
+spawn {{{GPG}}} --command-fd=0 --status-fd=1 --pinentry-mode=loopback --passphrase-file {{{PASSFILE}}} --expert --edit-key {{{KEY}}}
+
+# -- Send addkey command -----------------------------------------------------
+
+expect {
+    "GET_LINE keyedit\\.prompt*"    { send -- "addkey\r" }
+    timeout { send_error "Error: cannot send addkey command!\n"; exit 1 }
+}
+
+# -- Select key kind ---------------------------------------------------------
+
+expect {
+    -re "\\(8\\) RSA \\(set your own capabilities\\).*GET_LINE keygen.algo.*"
+                                    { send -- "8\r" }
+    timeout                         { send_error "Error: cannot select key of kind (8) RSA (set your own capabilities)!\n"; exit 2 }
+}
+
+# -- Select key capabilities -------------------------------------------------
+
+expect {
+    -re "Current allowed actions: Sign.*GET_LINE keygen.flags.*"
+                                    { send -- "S\r"; exp_continue }
+    -re "Current allowed actions: Encrypt.*GET_LINE keygen.flags.*"
+                                    { send -- "E\r"; exp_continue }
+    -re "Current allowed actions: Authenticate.*GET_LINE keygen.flags.*"
+                                    { send -- "A\r"; exp_continue }
+    -re "Current allowed actions: \r.*GET_LINE keygen.flags.*"
+                                    { send -- "A\r" }
+    timeout                         { send_error "Error: cannot select key capabilities!\n"; exit 3 }
+}
+expect {
+    -re "Current allowed actions: Authenticate.*GET_LINE keygen.flags.*"
+                                    { send -- "Q\r"; }
+    timeout                         { send_error "Error: cannot select key capabilities!\n"; exit 4 }
+}
+
+# -- Set key size ------------------------------------------------------------
+
+expect {
+    "GET_LINE keygen.size*"         { send -- "2048\r" }
+    timeout                         { send_error "Error: cannot set key size!\n"; exit 5 }
+}
+
+# -- Set key expiration time -------------------------------------------------
+
+expect {
+    "GET_LINE keygen.valid*"        { send -- "1\r" }
+    timeout                         { send_error "Error: cannot set key expiration time!\n"; exit 6 }
+}
+
+# -- Save changes ------------------------------------------------------------
+
+expect {
+    "GET_LINE keyedit.prompt*"      { send -- "save\r" }
+    timeout                         { send_error "Error: cannot save changes!\n"; exit 7 }
+}
+
+# -- Done! -------------------------------------------------------------------
+
+expect {
+    "KEY_CREATED*"              { }
+    timeout { send_error "Error: unexpected timeout!\n"; exit 7 }
+}
+set returnvalues [wait]
+set exitcode [lindex $returnvalues 3]
+exit $exitcode
+EOF
+    )
+
+    # -- Generate master key -------------------------------------------------
+
+    local res_gensubkey
+    res_gensubkey=$(set -x; expect <<< "$script_gensubkey")
+    echo "$res_gensubkey"
+
+    local fingerprint2=$( echo "$res_gensubkey" \
+        | grep "KEY_CREATED S" \
+        | sed 's/^.* KEY_CREATED S \([0-9A-F][0-9A-F]*\)[^0-9A-F]*$/\1/')
+    echo Fingerprint2 is $fingerprint2
+
+    glo | jq ".identities[$res_idx].fingerprint2 = \"$fingerprint2\"" | toglo
+
+    return 0
+}
+
+main "$@"
+exit $?
+
+
+
+
+
+
+
+
+
+
+
+
+# - Generate a master key for ID ---------------------------------------------
+
+#     # Generate master key
+# gpg --batch --generate-key - <<EOF
+# %echo Generating a basic OpenPGP key
+# Key-Type: RSA
+# Key-Length: 4096
+# Expire-Date: 0
+# Name-Real: Frederic Ruget
+# Name-Email: fred@atlant.is
+# Passphrase: $PASSPHRASE
+# %commit
+# %echo done
+# EOF
+
+/usr/bin/expect <<'EOF'
+set timeout 1
+spawn gpg --command-fd=0 --status-fd=1 --pinentry-mode=loopback --generate-key
+expect {
+    -re "GET_LINE keygen.name.*"    { }
+
+    -re "GET_LINE keyedit\\.prompt.*"
+        { send -- "addkey\r" }
+    timeout { send_error "Error: unexpected timeout!\n"; exit 127 }
+}
+expect {
+    -re "\\(5\\) RSA \\(sign only\\).*GET_LINE keygen.algo.*"
+                                    { send -- "4\r"; exp_continue }
+    timeout                         { send_error "Error: cannot select key of kind (4) RSA (sign only)!\n"; exit 127 }
+}
+expect {
+    "GET_LINE keygen.size*"         { send -- "4096\r"; exp_continue }
+    "GET_LINE keygen.valid*"        { send -- "0\r"; exp_continue }
+    "Is this correct?*"             { send -- "y\r"; exp_continue }
+    "Really create?*"               { send -- "y\r"; exp_continue }
+    "KEY_CREATED S*"                { send -- "save\r"; exp_continue }
+    "GET_HIDDEN passphrase.enter*"  { send -- "toto\r"; exp_continue }
+}
+set returnvalues [wait]
+set exitcode [lindex $returnvalues 3]
+exit $exitcode
+EOF
+
+# gpg --expert --edit-key "<fred@atlant.is>"
+#     # Request: `addkey`
+#     # Choose `(8)` for setting specific RSA capabilities
+#     # Set `authenticate`-only capabilities and `Q`uit
+#     # Choose `2048` keysize
+#     # Choose `0` for non-expiring key
+#     # Request: `save` and quit
+
+/usr/bin/expect <<'EOF'
+set timeout 1
+spawn gpg --command-fd=0 --status-fd=1 --pinentry-mode=loopback --edit-key toto@atlant.is
+expect {
+    -re "GET_LINE keyedit\\.prompt.*"
+        { send -- "addkey\r" }
+    timeout { send_error "Error: unexpected timeout!\n"; exit 127 }
+}
+expect {
+    -re "\\(5\\) RSA \\(sign only\\).*GET_LINE keygen.algo.*"
+                                    { send -- "4\r"; exp_continue }
+    timeout                         { send_error "Error: cannot select key of kind (4) RSA (sign only)!\n"; exit 127 }
+}
+expect {
+    "GET_LINE keygen.size*"         { send -- "4096\r"; exp_continue }
+    "GET_LINE keygen.valid*"        { send -- "0\r"; exp_continue }
+    "Is this correct?*"             { send -- "y\r"; exp_continue }
+    "Really create?*"               { send -- "y\r"; exp_continue }
+    "KEY_CREATED S*"                { send -- "save\r"; exp_continue }
+    "GET_HIDDEN passphrase.enter*"  { send -- "toto\r"; exp_continue }
+}
+set returnvalues [wait]
+set exitcode [lindex $returnvalues 3]
+exit $exitcode
+EOF
