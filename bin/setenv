@@ -8,18 +8,19 @@
 # You should have received a copy of the license along with this
 # work. If not, see <http://creativecommons.org/licenses/by/4.0/>.
 
-
 if [ "${0}" = "${BASH_SOURCE}" ]; then
   echo "Script $(basename "$BASH_SOURCE") is meant to be sourced"
   exit 1
 fi
 set -o pipefail
+unset JINX_NO_TRAP_ERR
+
 
 # -- Online help --------------------------------------------------------------
 
 if [ "$1" = "-b" -o "$1" = "--help" ]; then
         man -P ul /dev/stdin <<< $(cat <<EOF
-.TH SOURCE-ENV 1 2022-01-16 "Jinx Setup Tools" "JINX SETUP TOOLS"
+.TH SETENV 1 2022-01-16 "Jinx Setup Tools" "JINX SETUP TOOLS"
 .SH NAME
 .B $(basename "$BASH_SOURCE")
 - set environment for Jinx
@@ -94,35 +95,139 @@ export -f jinxnotice
 jinxerror () { echo "$DFLT$RED$BOLD${@}$DFLT"; }
 export -f jinxerror
 
-
-jinxpatch () {
-    local _sudo=""
+jinxtouch () ( # [--sudo] MODE [FILES...]
+    set +x
+    # .. Error management .....................................................
+    trap '{
+        local errno=$?
+        if [ -n "${JINX_NO_TRAP_ERR+x}" ]; then
+            trap - ERR;
+            jinxerror "ERROR ($errno) ${BASH_SOURCE}:${LINENO}" >&2;
+            return $errno;
+        fi;
+    }' ERR
+    # .. Options...............................................................
+    local _sudo=
+    if [ $# = 0 ]; then trap - ERR; return 1; fi
     if [ "$1" == "--sudo" ]; then _sudo=sudo; shift; fi
-    if [ "$1" == "--reverse" ]; then _reverse=reverse; shift; fi
-    local file="$1"
-    local delta="$2"
+    # .. Positional arguments..................................................
+    if [ $# = 0 ]; then trap - ERR; return 1; fi
+    local mode="$1"; shift
+    local mask="$((7-${mode::1}))$((7-${mode:1:1}))$((7-${mode:2:1}))"
+    # .. Positional arguments..................................................
+    while [ $# != 0 ]; do
+        $_sudo bash -c "umask $mask && touch $1 && chmod $mode $1"
+        shift
+    done
+    trap - ERR; 
+)
+export -f jinxtouch
 
-    if [ -z "$_reverse" ]; then
+jinxpatch () ( # [--sudo] [--reverse] FILE [PATCH]
+    # Note: jinxpatch assumes that the patch has been computed with:
+    # LC_ALL=C TZ=UTC0 diff --new-file --text --unified orig-file new-file
+    set +x
+    # .. Error management .....................................................
+    trap '{
+        local errno=$?
+        if [ -z "${JINX_NO_TRAP_ERR+x}" ]; then
+            trap - ERR;
+            jinxerror "ERROR ($errno) ${BASH_SOURCE}:${LINENO}" >&2;
+            return $errno;
+        fi;
+    }' ERR
+    # .. Options...............................................................
+    local _sudo=
+    local _rev # no "=": let _rev undefined
+    if [ $# = 0 ]; then trap - ERR; return 2; fi
+    if [ "$1" == "--sudo" ]; then _sudo=sudo; shift; fi
+    if [ $# = 0 ]; then rtrap - ERR; eturn 2; fi
+    if [ "$1" == "--reverse" ]; then _rev=; shift; fi
+    # .. Positional arguments..................................................
+    if [ $# = 0 -o $# -gt 2 ]; then trap - ERR; return 2; fi
+    local file="$1"
+    local delta
+    if [ $# = 1 ]; then delta="$(cat)"; else delta="$2"; fi
+
+    # .. Body .................................................................
+    JINX_NO_TRAP_ERR=
+    if [ -z "${_rev+x}" ]; then
         echo "$delta" | $_sudo patch --dry-run --quiet --force --reverse $file > /dev/null
-        if [ $? = 0 ]; then return 0; fi
+        if [ $? = 0 ]; then # Patch was already applied
+            trap - ERR;
+            jinxnotice "File $file was already patched"
+            return 0
+        fi
+        unset JINX_NO_TRAP_ERR
         echo "$delta" | $_sudo patch --unified --forward --backup-if-mismatch $file
     else
         echo "$delta" | $_sudo patch --dry-run --quiet --forward $file > /dev/null
-        if [ $? = 0 ]; then return 0; fi
+        if [ $? = 0 ]; then # Patch was already reversed
+            trap - ERR;
+            jinxnotice "File $file was already unpatched"
+            return 0;
+        fi
+        unset JINX_NO_TRAP_ERR
         echo "$delta" | $_sudo patch --unified --force --reverse --backup-if-mismatch $file
     fi
     local errno=$?
-    if [ $errno != 0 ]; then
-        jinxerror "Cannot patch $file" >&2
-        return 1
-    else
-        return 0
-    fi
-
-    # Note: smartpatch assumes that the delta information has been computed with:
-    # LC_ALL=C TZ=UTC0 diff --new-file --text --unified orig-file new-file
-}
+    trap - ERR
+    return $errno
+)
 export -f jinxpatch
+
+
+jinx-update-section () ( # [--sudo] FILE SECTION [CONTENTS]
+    set +x
+    # .. Error management .....................................................
+    trap '{
+        local errno=$?
+        if [ -z "${JINX_NO_TRAP_ERR+x}" ]; then
+            trap - ERR;
+            jinxerror "ERROR ($errno) ${BASH_SOURCE}:${LINENO}" >&2;
+            return $errno;
+        fi;
+    }' ERR
+    # .. Options...............................................................
+    local _sudo=
+    if [ $# = 0 ]; then trap - ERR; return 2; fi
+    if [ "$1" == "--sudo" ]; then _sudo=sudo; shift; fi
+    # .. Positional arguments..................................................
+    if [ $# -lt 2 -o $# -gt 3 ]; then trap - ERR; return 2; fi
+    local file="$1"
+    local section="$2"
+    local contents
+    if [ $# = 3 ]; then contents="$3"; else contents="$(cat)"; fi
+
+    # .. Body .................................................................
+    local inmark="# --> $section ------------------------------------------------------------------------"
+    local outmark="# <-- $section ------------------------------------------------------------------------"
+    inmark="${inmark::79}"
+    outmark="${outmark::79}"
+    local orig
+    #JINX_NO_TRAP_ERR=
+    orig=$($_sudo cat $file)
+    #if [ $? != 0 ]; then trap - ERR; return 2; fi
+    #unset JINX_NO_TRAP_ERR
+    if grep -q "$inmark" /dev/stdin <<< "$orig"; then
+        $_sudo perl -i -pe "BEGIN { undef \$/; binmode STDIN, \":encoding(UTF-8)\"; binmode STDOUT, \":encoding(UTF-8)\"; } s/\n$inmark.*\n$outmark/\n$inmark\n$outmark/smg" "$file" 
+    else
+        ( $_sudo cat "$file" && echo $'\n'"$inmark"$'\n'"$outmark" ) | $_sudo sponge "$file"
+    fi
+    $_sudo perl -i -pe "BEGIN { \$r = pop; undef \$/; binmode STDIN, \":encoding(UTF-8)\"; binmode STDOUT, \":encoding(UTF-8)\"; } s|\n$inmark\n$outmark|\n$inmark\n\$r\n$outmark|smg" "$file" "$contents"
+    local delta=$(LC_ALL=C TZ=UTC0 $_sudo diff --new-file --text --unified /dev/stdin "$file" <<< "$orig")
+    if [ -z "$delta" ]; then
+        jinxnotice "No need to update $file."
+    else
+        jinxnotice "File $file was patched with:"
+        jinxnotice "$delta"
+    fi
+    trap - ERR
+)
+export -f jinx-update-section
+
+
+
 
 
 jinxglo () {
@@ -134,6 +239,16 @@ jinxtog () {
     sponge "$JINX_CONFIG"
 }
 export -f jinxtog
+
+jinxjq () {
+    cat "$JINX_CONFIG" | jq "$@"
+}
+export -f jinxjq
+
+jinxjqr () {
+    cat "$JINX_CONFIG" | jq -r "$@"
+}
+export -f jinxjqr
 
 jinxe() {
     "$JINX_ROOT/bin/jinxe" "$@"
