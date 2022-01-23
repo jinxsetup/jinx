@@ -14,7 +14,7 @@ if [ "${0}" != "${BASH_SOURCE}" ]; then
   echo "Script $(basename "$BASH_SOURCE") is not meant to be sourced"
   return 1
 fi
-source "$(dirname "$BASH_SOURCE")/setenv"
+source "$(dirname "$BASH_SOURCE")/setenv" ""
 set -e
 
 
@@ -22,27 +22,6 @@ set -e
 
 # [ Empty ]
 
-
-# == Utilities ================================================================
-
-
-ssh-hash-hostname () {
-    # $1 <-- hostname
-
-    # See https://security.stackexchange.com/questions/56268/ssh-benefits-of-using-hashed-known-hosts
-
-    # Compute 40-hex-digit random salt
-    local salt=$( head -c20 < /dev/urandom | xxd -p )
-    # Compute right part of hash
-    local hash=$( echo -n "$1" | openssl sha1 -mac HMAC -macopt hexkey:$salt \
-        | awk '{print $2}' )
-    # Return full hash
-    echo -n "|1|"
-    echo -n "$salt" | xxd -r -p | base64 -w 0
-    echo -n "|"
-    echo -n "$hash" | xxd -r -p | base64 -w 0
-    echo -n " "
-}
 
 # == Main =====================================================================
 
@@ -158,9 +137,11 @@ EOF
                 | jq -r ".hosts[$hostidx].hostkeys[$keyidx].pubkey" \
                 | base64 -d | jinxd )"
             jinxnotice "Adding $thisalgo key for $subhost"
-            ( ssh-hash-hostname "$subhost" && cat ) >> ~/.ssh/known_hosts <<< "$thiskey"
             jinxnotice "Adding $thisalgo key for $fqdn"
-            ( ssh-hash-hostname "$fqdn" && cat ) >> ~/.ssh/known_hosts <<< "$thiskey"
+            (
+                "$JINX_ROOT/lib/hashssh" "$subhost" && echo " $thiskey"
+                "$JINX_ROOT/lib/hashssh" "$fqdn" && echo " $thiskey"
+            ) >> ~/.ssh/known_hosts <<< "$thiskey"
         done
     done
     trap - ERR;
