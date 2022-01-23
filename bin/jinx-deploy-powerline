@@ -98,16 +98,20 @@ main () {
 .SH DESCRIPTION
 \fB$(basename "$BASH_SOURCE")\fR deploys a powerline-like status line for bash.
 
-See:
+Powerline a better experience in combination with the CASCADIA CODE PL font. 
+
+For details, see:
 .RS
 .IP -
-\fIhttps://www.hanselman.com/blog/how-to-make-a-pretty-prompt-in-windows-terminal-with-powerline-nerd-fonts-cascadia-code-wsl-an>\fR
-.IP -
-\fIhttps://github.com/justjanne/powerline-go?WT.mc_id=-blog-scottha\fR
-.IP -
-\fIhttps://github.com/microsoft/cascadia-code/releases?WT.mc_id=-blog-scottha\fR
+\fIhttps://www.hanselman.com/blog/how-to-make-a-pretty-prompt-in-windows-terminal-with-powerline-nerd-fonts-cascadia-code-wsl-and-ohmyposh\fR
 .IP -
 \fIhttps://gist.github.com/mordr/12a813bdbd28a14be7602fb686b79f06\fR
+.IP -
+\fIhttps://github.com/justjanne/powerline-go\fR
+.IP -
+\fIhttps://docs.microsoft.com/en-us/windows/terminal/cascadia-code\fR
+.IP -
+\fIhttps://github.com/microsoft/cascadia-code/releases\fR
 .RE
 
 .SH OPTIONS
@@ -150,14 +154,7 @@ EOF
     # -- Activate powerline prompt --------------------------------------------
     jinxh1 "Activating powerline prompt for bash..."
     jinx-update-section "$HOME/.bashrc" "powerline-go" <<'EOF'
-# Activate powerline prompt
-# https://www.hanselman.com/blog/how-to-make-a-pretty-prompt-in-windows-terminal-with-powerline-nerd-fonts-cascadia-code-wsl-an>
-# https://github.com/justjanne/powerline-go?WT.mc_id=-blog-scottha
-# https://github.com/microsoft/cascadia-code/releases?WT.mc_id=-blog-scottha
-# https://gist.github.com/mordr/12a813bdbd28a14be7602fb686b79f06
-
-#GOPATH=$HOME/go
-function jinx_ps1() {
+jinx_ps1 () {
     PS1="$($HOME/go/bin/powerline-go \
         -cwd-max-depth 5 \
         -max-width 95 -shell bash\
