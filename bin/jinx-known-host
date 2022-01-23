@@ -121,8 +121,10 @@ EOF
         # -- Remove subhost from ~/.ssh/known_hosts ---------------------------
         if [ -f ~/.ssh/known_hosts ]; then
             jinxnotice "Removing $subhost from ~/.ssh/known_hosts..."
-            ssh-keygen -q -R "$subhost" > /dev/null
             ssh-keygen -q -R "$fqdn" > /dev/null
+            if [ "$subhost" != "$fqdn" ]; then
+                ssh-keygen -q -R "$subhost" > /dev/null
+            fi
         else
             ( umask 022 && touch ~/.ssh/known_hosts )
         fi
@@ -136,12 +138,16 @@ EOF
             local thiskey="$( jinxglo \
                 | jq -r ".hosts[$hostidx].hostkeys[$keyidx].pubkey" \
                 | base64 -d | jinxd )"
-            jinxnotice "Adding $thisalgo key for $subhost"
-            jinxnotice "Adding $thisalgo key for $fqdn"
+            jinxnotice "Adding $thisalgo key for $fqdn..."
             (
-                "$JINX_ROOT/lib/hashssh" "$subhost" && echo " $thiskey"
                 "$JINX_ROOT/lib/hashssh" "$fqdn" && echo " $thiskey"
             ) >> ~/.ssh/known_hosts <<< "$thiskey"
+            if [ "$subhost" != "$fqdn" ]; then
+                jinxnotice "Adding $thisalgo key for $subhost..."
+                (
+                    "$JINX_ROOT/lib/hashssh" "$subhost" && echo " $thiskey"
+                ) >> ~/.ssh/known_hosts <<< "$thiskey"
+            fi
         done
     done
     trap - ERR;

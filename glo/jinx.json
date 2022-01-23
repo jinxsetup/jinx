@@ -42,6 +42,24 @@
       "jinx_repos": [
         "git@github.com:jinxsetup/jinx.git"
       ]
+    },
+    {
+      "name": "github.com",
+      "fqdn": "github.com",
+      "hostkeys": [
+        {
+          "algo": "ed25519",
+          "pubkey": "jA0ECQMC4WrM6akEZ3T/0oIBE8vMLWgcb0rsBM5PtT0dRk+5uJEMpLBZfv3RO8Us4b6cFARk5O2meVfF9LgdWiT7TJVRGSkccDlINFEnOtzLB+X8XyyO0uuy5Q3akGBcEeurpnqhzz0zybDwwosrIw6BlFORKC1qPYrD/G3+zoW4uc/ObDK8Pv3c2/4R/RGgEQsY"
+        },
+        {
+          "algo": "ecdsa",
+          "pubkey": "jA0ECQMCU7IDmAs0L1z/0sAGART/see25QjIvWFjlpx5qL+Fsbe7AztftdTTDOAGZ6FWGnyzdll37Zy3wcCvn3sN1yzuUtJrYfE/uKXUis2vVtsPK0vc0ymSWQeaPHqIq8rPakpb4D8/Nend3wyxVOvixNveHMGMrxniqFYVPTnLTdo2VUDMkeaiAZUTj//2iTSRnWnl1K2Sog/yQ3axiDAV1VHT4ED9sRI5qVoCeBJ8NeHag7cSClMmg8NVqvCa/gyR/H0oowMJkJC0pUMiyzW2Hy5n24gu"
+        },
+        {
+          "algo": "rsa",
+          "pubkey": "jA0ECQMCpKfmOgql3Yb/0sC+AROdnxBECupBQOoSS68urmup6ugRj+IuN69nJcgepirEWb6100ypMuRsbwE7sjO5gIM1ra9/lwX8URBYpQ52lQL1/dRRRZNh+n9+KuI1Iewo0pXUTQOWeVDksBuPOAfeVrGsCeCMitxz6Gdl2t48+G/ls2xXOrUBbJgSX0Rv1O5bHVWYk9Z1Mdus+GuKmkjzOyFOgCboKTVWSlBYF7M2CJvtMlkAnWMshvD+mCZO2UhyveBSDqDN1RdUhcTBv6+//nibOTFqUaohJdPLQAlTOchWirDJusJYpRzjewZSvxUnE5TnelsF9kJ78WyP4g6KzOTVD4golWZEUKUx2RqGbi864Bh8+oS2cenPGzSvlGWAFyrWHJVGgwVK7Ii+AURO1+Z1i4vchFVhsq1p/08FXC12EKS+5HKJZbmU3yMm+t7HtbUnPCqxT37I4ONZNJzutk6i9MqVqCJD7//Bd3iePwwSiGSkIEounUICDt+DKQzP3DYF2d1vCbXKVZTVIw=="
+        }
+      ]
     }
   ]
 }
