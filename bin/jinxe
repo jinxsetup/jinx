@@ -15,8 +15,7 @@ if [ "${0}" != "${BASH_SOURCE}" ]; then
   echo "Script $(basename "$BASH_SOURCE") is not meant to be sourced"
   return 1
 fi
-source "$(dirname "$BASH_SOURCE")/setenv"
-set -e
+source "$(dirname "$BASH_SOURCE")/setenv" ""
 
 
 # == Parse command line ======================================================
