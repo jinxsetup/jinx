@@ -1,0 +1,132 @@
+#!/bin/bash
+
+# jinx-deploy-git.sh (c) by Frederic Ruget (fred@atlant.is)
+# 
+# This work is licensed under a
+# Creative Commons Attribution 4.0 International License.
+# 
+# You should have received a copy of the license along with this
+# work. If not, see <http://creativecommons.org/licenses/by/4.0/>.
+
+
+# == Check we are correctly invoked and set env ==============================
+
+if [ "${0}" != "${BASH_SOURCE}" ]; then
+  echo "Script $(basename "$BASH_SOURCE") is not meant to be sourced"
+  return 1
+fi
+source "$( dirname "$BASH_SOURCE" )/setenv" ""
+
+
+# == Main =====================================================================
+
+main () {
+
+    # .. Error management .....................................................
+    trap '{
+        local errno=$?
+        if [ -n "${JINX_NO_TRAP_ERR+x}" ]; then
+            trap - ERR;
+            jinxerror "ERROR ($errno) ${BASH_SOURCE}:${LINENO}" >&2;
+            return $errno;
+        fi;
+    }' ERR
+    
+    # .. Ingestion of command line arguments ..................................
+    local _help _verbose _bash
+    local _args=()
+    while (( "$#" )); do
+        case "$1" in
+        --bash)
+            _bash=
+            shift
+            ;;
+        -h|--help)
+            _help=
+            shift
+            ;;
+        -[^-]*|--?*) # unsupported flags
+            jinxerror "Error: Unsupported flag $1" >&2
+            trap - ERR
+            return 1
+            ;;
+        *) # preserve positional arguments
+            args+=("$1")
+            shift
+            ;;
+        esac
+    done
+    # Args cheatsheet...
+    # args=(a "b c")
+    # echo ${args[@]}   --> a b c
+    # echo ${#args[@]}  --> 2
+    # echo ${!args[@]}  --> 0 1
+    # echo ${args[1]}   --> b c
+    # for i in ${!args[@]}; do echo -n "${args[$i]}-"; done --> a-b c-
+
+    # -- For debug only... ----------------------------------------------------
+
+    if [ -n "${_bash+x}" ]; then
+        trap - ERR
+        bash --init-file <(echo "PS1='debug$ '")
+        return 0
+    fi
+
+    # -- Online help ----------------------------------------------------------
+
+    if [ -n "${_help+set}" ]; then
+        man -P ul /dev/stdin <<< $(cat <<EOF
+.TH $(basename "$BASH_SOURCE" | awk '{ print toupper($0) }') \
+1 2022-01-22 "Jinx Setup Tools" "JINX SETUP TOOLS"
+.SH NAME
+.B $(basename "$BASH_SOURCE")
+- deploy Git on local host
+
+.SH OPTIONS
+
+.TP
+.B  --help
+.TQ
+.B  -h
+Print a usage message.
+EOF
+        )
+        trap - ERR
+        return 0
+    fi
+
+    # -- Main body ------------------------------------------------------------
+
+    jinxh0
+    jinxh0 "*** $( basename $BASH_SOURCE ) ***"
+    if [ ${#args[@]} != 0 ]; then
+        error "$BASH_SOURCE does not expect any arguments"
+        trap - ERR
+        return 1
+    fi
+
+    local host="$( hostname --short )"
+    local hostidx=$( jinxglo | jq "[ .hosts[] | .name == \"$host\" ] | index(true)" )
+
+    # -- Check validity of host -----------------------------------------------
+    if [ "$hostidx" = null ]; then
+        jinxerror "Error: host $host is unknown in $JINX_CONFIG"
+        exit 1
+    fi
+    local admin_fullname="$( jinxglo | jq -r .hosts[$hostidx].admin_fullname )"
+    local admin_email="$( jinxglo | jq -r .hosts[$hostidx].admin_email )"
+    jinxh1 "Installing git..."
+    set -x
+    sudo apt-get install --yes git
+    set +x
+    jinxh1 "Configuring git globals..."
+    set -x
+    git config --global user.name "$admin_fullname"
+    git config --global user.email "$admin_email"
+    set +x
+}
+
+
+# == Do it ===================================================================
+
+main "$@"

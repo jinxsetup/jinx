@@ -1,0 +1,178 @@
+#!/bin/bash
+
+# jinx-deploy-powerline (c) by Frederic Ruget (fred@atlant.is)
+# 
+# This work is licensed under a
+# Creative Commons Attribution 4.0 International License.
+# 
+# You should have received a copy of the license along with this
+# work. If not, see <http://creativecommons.org/licenses/by/4.0/>.
+
+
+# == Check we are correctly invoked and set env ==============================
+if [ "${0}" != "${BASH_SOURCE}" ]; then
+    function jinx_ps1() {
+        PS1="$($HOME/go/bin/powerline-go \
+            -cwd-max-depth 5 \
+            -max-width 95 -shell bash\
+            -modules 'host,cwd,git,hg,jobs,exit,root')"
+    }
+
+    if [ "$TERM" != "linux" ]; then
+        PROMPT_COMMAND="jinx_ps1; $PROMPT_COMMAND"
+    fi
+    return 0
+fi
+source "$(dirname "$BASH_SOURCE")/setenv" "$JINX_CONFIG"
+
+
+# == Main =====================================================================
+
+main () {
+
+    # .. Error management .....................................................
+    trap '{
+        local errno=$?
+        if [ -n "${JINX_NO_TRAP_ERR+x}" ]; then
+            trap - ERR;
+            jinxerror "ERROR ($errno) ${BASH_SOURCE}:${LINENO}" >&2;
+            return $errno;
+        fi;
+    }' ERR
+    
+    # .. Ingestion of command line arguments ..................................
+
+    local _help _bash
+    local _args=()
+    while (( "$#" )); do
+        case "$1" in
+        --bash)
+            _bash=
+            shift
+            ;;
+        -h|--help)
+            _help=
+            shift
+            ;;
+        -[^-]*|--?*) # unsupported flags
+            jinxerror "Error: Unsupported flag $1" >&2
+            trap - ERR
+            return 1
+            ;;
+        *) # preserve positional arguments
+            args+=("$1")
+            shift
+            ;;
+        esac
+    done
+    # Args cheatsheet...
+    # args=(a "b c")
+    # echo ${args[@]}   --> a b c
+    # echo ${#args[@]}  --> 2
+    # echo ${!args[@]}  --> 0 1
+    # echo ${args[1]}   --> b c
+    # for i in ${!args[@]}; do echo -n "${args[$i]}-"; done --> a-b c-
+
+    # .. For debug only... ....................................................
+
+    if [ -n "${_bash+set}" ]; then
+        bash --init-file <(echo "PS1='debug$ '")
+        trap - ERR
+        return 0
+    fi
+
+    # .. Online help ..........................................................
+
+    if [ -n "${_help+set}" ]; then
+        man -P ul /dev/stdin <<< $(cat <<EOF
+.TH $(basename "$BASH_SOURCE" | awk '{ print toupper($0) }') \
+1 2022-01-22 "Jinx Setup Tools" "JINX SETUP TOOLS"
+.SH NAME
+.B $(basename "$BASH_SOURCE")
+- deploy powerline-like status line for bash
+
+.SH SYNOPSIS
+.B $(basename "$BASH_SOURCE")
+[\fIOPTIONS\fR]
+
+.SH DESCRIPTION
+\fB$(basename "$BASH_SOURCE")\fR deploys a powerline-like status line for bash.
+
+See:
+.RS
+.IP -
+\fIhttps://www.hanselman.com/blog/how-to-make-a-pretty-prompt-in-windows-terminal-with-powerline-nerd-fonts-cascadia-code-wsl-an>\fR
+.IP -
+\fIhttps://github.com/justjanne/powerline-go?WT.mc_id=-blog-scottha\fR
+.IP -
+\fIhttps://github.com/microsoft/cascadia-code/releases?WT.mc_id=-blog-scottha\fR
+.IP -
+\fIhttps://gist.github.com/mordr/12a813bdbd28a14be7602fb686b79f06\fR
+.RE
+
+.SH OPTIONS
+
+.TP
+.B  --help
+.TQ
+.B  -h
+Print a usage message.
+EOF
+        )
+        trap - ERR
+        return 0
+    fi
+
+    # -- Main body ------------------------------------------------------------
+
+    sudo echo -n # Make sure we have a fresh sudo
+
+    jinxh0
+    jinxh0 "*** $(basename $BASH_SOURCE) ***"
+    if [ ${#args[@]} != 0 ]; then
+        error "$BASH_SOURCE does not expect any arguments"
+        trap - ERR
+        return 1
+    fi
+
+    # -- Install golang -------------------------------------------------------
+    jinxh1 "Installing golang..."
+    set -x
+    sudo apt-get install --yes golang
+    set +x
+
+    # -- Install powerline-go -------------------------------------------------
+    jinxh1 "Installing powerline-go..."
+    set -x
+    go get -u github.com/justjanne/powerline-go
+    set +x
+
+    # -- Activate powerline prompt --------------------------------------------
+    jinxh1 "Activating powerline prompt for bash..."
+    jinx-update-section "$HOME/.bashrc" "powerline-go" <<'EOF'
+# Activate powerline prompt
+# https://www.hanselman.com/blog/how-to-make-a-pretty-prompt-in-windows-terminal-with-powerline-nerd-fonts-cascadia-code-wsl-an>
+# https://github.com/justjanne/powerline-go?WT.mc_id=-blog-scottha
+# https://github.com/microsoft/cascadia-code/releases?WT.mc_id=-blog-scottha
+# https://gist.github.com/mordr/12a813bdbd28a14be7602fb686b79f06
+
+#GOPATH=$HOME/go
+function jinx_ps1() {
+    PS1="$($HOME/go/bin/powerline-go \
+        -cwd-max-depth 5 \
+        -max-width 95 -shell bash\
+        -modules 'host,cwd,git,hg,jobs,exit,root')"
+}
+
+if [ "$TERM" != "linux" ]; then
+    PROMPT_COMMAND="jinx_ps1; $PROMPT_COMMAND"
+fi
+EOF
+
+    trap - ERR
+}
+
+
+# == Do it ====================================================================
+
+main "$@"

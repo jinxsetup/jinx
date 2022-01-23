@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# jinx-upgrade-ubuntu.sh (c) by Frederic Ruget (fred@atlant.is)
+# 
+# This work is licensed under a
+# Creative Commons Attribution 4.0 International License.
+# 
+# You should have received a copy of the license along with this
+# work. If not, see <http://creativecommons.org/licenses/by/4.0/>.
+
+
+# == Check we are correctly invoked and set env ==============================
+
+if [ "${0}" != "${BASH_SOURCE}" ]; then
+  echo "Script $(basename "$BASH_SOURCE") is not meant to be sourced"
+  return 1
+fi
+set -o pipefail
+set -e
+
+
+# == Main =====================================================================
+
+main () {
+    echo "Upgrading ubuntu..."
+    set -x
+    sudo apt-get update
+    # https://serverfault.com/questions/527789/how-to-automate-changed-config-files-during-apt-get-upgrade-in-ubuntu-12
+    sudo apt-get --yes --force-yes \
+        -o Dpkg::Options::="--force-confdef" \
+        -o Dpkg::Options::="--force-confold" upgrade
+    set +x
+
+    echo "Installing various packages..."
+    set -x
+    sudo apt-get install --yes moreutils
+    sudo apt-get install --yes jq
+    sudo apt-get install --yes unzip
+    sudo apt-get install --yes makepasswd
+    set +x
+
+    #boldgreen
+    #boldgreen "Installing Powerline Go bash prompt..."
+    #(set -x
+    #    sudo apt-get install --yes golang
+    #    go get -u github.com/justjanne/powerline-go
+    #)
+}
+
+
+# == Do it ====================================================================
+
+main

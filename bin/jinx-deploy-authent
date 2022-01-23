@@ -1,0 +1,350 @@
+#!/bin/bash
+
+# jinx-deploy-authent (c) by Frederic Ruget (fred@atlant.is)
+# 
+# This work is licensed under a
+# Creative Commons Attribution 4.0 International License.
+# 
+# You should have received a copy of the license along with this
+# work. If not, see <http://creativecommons.org/licenses/by/4.0/>.
+
+
+# == Check we are correctly invoked and set env ==============================
+if [ "${0}" != "${BASH_SOURCE}" ]; then
+    # Initialize SSH_AUTH_SOCK and launch gpg-agent on login
+    echo
+    echo "ACTIVATING GPG-AGENT AND CONNECTION TO PINENTRY..."
+    export SSH_AUTH_SOCK=$(gpgconf --list-dirs agent-ssh-socket)
+    export PINENTRY_USER_DATA="USE_CURSES=1"
+    gpgconf --launch gpg-agent
+    source ~/.bashrc
+    return 0
+fi
+source "$(dirname "$BASH_SOURCE")/setenv" "$JINX_CONFIG"
+
+
+# == Patches ==================================================================
+
+# -- /usr/bin/pinentry-switch -------------------------------------------------
+
+pinentry-switch-patch () (
+    set +x
+    LC_ALL=C TZ=UTC0 diff --new-file --text --unified /dev/null /dev/stdin \
+    <<'EOF'
+#!/bin/bash
+if [ "$PINENTRY_USER_DATA" = "USE_CURSES=1" ]
+then exec /usr/bin/pinentry-curses "$@"
+else exec /usr/bin/pinentry "$@"
+fi
+EOF
+)
+export -f pinentry-switch-patch
+
+
+# -- ~/.gnupg/gpg-agent.conf --------------------------------------------------
+
+gpg-agent-conf-patch () (
+    set +x
+    LC_ALL=C TZ=UTC0 diff --new-file --text --unified /dev/null /dev/stdin \
+    <<'EOF'
+enable-ssh-support
+pinentry-program /usr/bin/pinentry-switch
+EOF
+)
+export -f gpg-agent-conf-patch
+
+
+# -- ~/.gnupg/sshcontrol ------------------------------------------------------
+
+sshcontrol-patch () (
+    # .. Positional arguments .................................................
+    local keygrip="$1"
+    # .. Body .................................................................
+    set +x
+    (
+        sed "s/{{{KEYGRIP}}}/$keygrip/g" \
+        | LC_ALL=C TZ=UTC0 diff --new-file --text --unified /dev/null /dev/stdin
+    ) <<'EOF'
+{{{KEYGRIP}}}
+EOF
+)
+export -f sshcontrol-patch
+
+
+# -- /etc/xdg/autostart/gnome-keyring-ssh.desktop -----------------------------
+
+gnome-keyring-patch () (
+    set +x
+    cat <<'EOF'
+--- /etc/xdg/autostart/gnome-keyring-ssh.desktop.orig	2021-05-04 06:56:17.643648778 +0000
++++ /etc/xdg/autostart/gnome-keyring-ssh.desktop	2021-05-04 06:56:56.036310435 +0000
+@@ -12,3 +12,4 @@
+ X-GNOME-Bugzilla-Component=general
+ X-GNOME-Bugzilla-Version=3.36.0
+ X-Ubuntu-Gettext-Domain=gnome-keyring
++Hidden=true
+EOF
+)
+export -f gnome-keyring-patch
+
+
+# -- /etc/X11/Xsession.options ------------------------------------------------
+
+Xsession-options-patch () (
+    set +x
+    cat <<'EOF'
+--- /etc/X11/Xsession.options	2021-05-04 00:50:59.784499367 +0000
++++ /etc/X11/Xsession.options	2021-05-04 00:51:17.297051840 +0000
+@@ -5,5 +5,4 @@
+ allow-failsafe
+ allow-user-resources
+ allow-user-xsession
+-use-ssh-agent
+ use-session-dbus
+EOF
+)
+export -f Xsession-options-patch
+
+
+# -- ~/.xsession --------------------------------------------------------------
+
+xsession-patch () (
+    set +x
+    cat <<'EOF'
+--- .xsession	2021-05-04 10:12:57.175673545 +0000
++++ .xsession	2021-05-04 10:12:47.855455168 +0000
+@@ -0,0 +1 @@
++eval $(gpg-agent --daemon)
+EOF
+)
+export -f xsession-patch
+
+
+# -- ~/.ssh/config ------------------------------------------------------------
+
+ssh-config-patch () (
+    set +x
+    cat <<'EOF'
+--- .ssh/config	1970-01-01 00:00:00.000000000 +0000
++++ .ssh/config	2021-05-05 17:16:31.254676810 +0000
+@@ -0,0 +1,4 @@
++Host localhost
++ForwardAgent yes
++AddKeysToAgent ask
++Match host * exec "gpg-connect-agent UPDATESTARTUPTTY /bye"
+EOF
+)
+export -f ssh-config-patch
+
+
+# == Main =====================================================================
+
+main () {
+
+    # .. Error management .....................................................
+    trap '{
+        local errno=$?
+        if [ -n "${JINX_NO_TRAP_ERR+x}" ]; then
+            trap - ERR;
+            jinxerror "ERROR ($errno) ${BASH_SOURCE}:${LINENO}" >&2;
+            return $errno;
+        fi;
+    }' ERR
+    
+    # .. Ingestion of command line arguments ..................................
+
+    local _help _bash
+    local _args=()
+    while (( "$#" )); do
+        case "$1" in
+        --bash)
+            _bash=
+            shift
+            ;;
+        -h|--help)
+            _help=
+            shift
+            ;;
+        -[^-]*|--?*) # unsupported flags
+            jinxerror "Error: Unsupported flag $1" >&2
+            trap - ERR
+            return 1
+            ;;
+        *) # preserve positional arguments
+            args+=("$1")
+            shift
+            ;;
+        esac
+    done
+    # Args cheatsheet...
+    # args=(a "b c")
+    # echo ${args[@]}   --> a b c
+    # echo ${#args[@]}  --> 2
+    # echo ${!args[@]}  --> 0 1
+    # echo ${args[1]}   --> b c
+    # for i in ${!args[@]}; do echo -n "${args[$i]}-"; done --> a-b c-
+
+    # .. For debug only... ....................................................
+
+    if [ -n "${_bash+set}" ]; then
+        bash --init-file <(echo "PS1='debug$ '")
+        trap - ERR
+        return 0
+    fi
+
+    # .. Online help ..........................................................
+
+    if [ -n "${_help+set}" ]; then
+        man -P ul /dev/stdin <<< $(cat <<EOF
+.TH $(basename "$BASH_SOURCE" | awk '{ print toupper($0) }') \
+1 2022-01-22 "Jinx Setup Tools" "JINX SETUP TOOLS"
+.SH NAME
+.B $(basename "$BASH_SOURCE")
+- deploy authentication on local host
+
+.SH SYNOPSIS
+.B $(basename "$BASH_SOURCE")
+[\fB-h\fR | \fB--help\fR]
+
+source \fB$(basename "$BASH_SOURCE")\fR
+
+.SH DESCRIPTION
+\fB$(basename "$BASH_SOURCE")\fR can be used two ways:
+.RS
+.IP forked:
+\fB$(basename "$BASH_SOURCE")\fR deploys admin identity on the local host and
+configures the gpg-agent to enable working with ssh.
+.IP sourced:
+\fB$(basename "$BASH_SOURCE")\fR connects the gpg-agent to the correct TTY
+to enable keying in passphrases.
+.RE
+
+.SH OPTIONS
+
+.TP
+.B  --help
+.TQ
+.B  -h
+Print a usage message.
+EOF
+        )
+        trap - ERR
+        return 0
+    fi
+
+    # -- Main body ------------------------------------------------------------
+
+    sudo echo -n # Make sure we have a fresh sudo
+
+    jinxh0
+    jinxh0 "*** $(basename $BASH_SOURCE) ***"
+    if [ ${#args[@]} != 0 ]; then
+        error "$BASH_SOURCE does not expect any arguments"
+        trap - ERR
+        return 1
+    fi
+
+    # -- Determine localhost --------------------------------------------------
+    local localhost=$( hostname --short )
+    local hostidx=$( jinxjq "[ .hosts[] | .name == \"$localhost\" ] | index(true)" )
+    if [ "$hostidx" = null ]; then
+        jinxerror "Error: host $host is unknown in $JINX_CONFIG"
+        exit 1
+    fi
+
+    # -- Determine admin ------------------------------------------------------
+    local adminname="$( jinxjqr .hosts[$hostidx].admin_name )"
+    local adminidx=$( jinxjq "[ .identities[] | .name == \"$adminname\" ] | index(true)" )
+    if [ "$adminidx" = null ]; then
+        jinxerror "Error: user $adminname is unknown in $JINX_CONFIG"
+        exit 1
+    fi
+
+    # -- Import admin key -----------------------------------------------------
+    jinxh1 "Retrieving user $adminname's key pair..."
+    local adminkey="$( jinxjqr .identities[$adminidx].key_material \
+        | base64 -d | jinxd )"
+    local passfile="$HOME/.ssh/$( jinxglo | jq -r ".passphrase_file" )"
+    set -x
+    gpg --batch --passphrase-file "$passfile" --import <<< "$( echo "$adminkey" )"
+    set +x
+
+    # -- Configure gpg-agent for ssh control ---------------------------------
+    jinxh1
+    jinxh1 "Configuring gpg-agent for ssh control..."
+    jinxtouch --sudo 755 /usr/bin/pinentry-switch
+    set -x
+    jinxpatch --sudo /usr/bin/pinentry-switch "$(pinentry-switch-patch)"
+    set +x
+
+    # -- Set up gpg-agent.conf ------------------------------------------------
+    jinxh2 "Setting up gpg-agent.conf..."
+    jinxtouch 640 "$HOME/.gnupg/gpg-agent.conf"
+    set -x
+    jinxpatch "$HOME/.gnupg/gpg-agent.conf" "$(gpg-agent-conf-patch)"
+    set +x
+
+    # -- Set up sshcontrol ----------------------------------------------------
+    jinxh2 "Setting up sshcontrol..."
+    local A_keygrip="$( jinxjqr .identities[$adminidx].A_keygrip )"
+    jinxtouch 640 "$HOME/.gnupg/sshcontrol"
+    set -x
+    jinxpatch "$HOME/.gnupg/sshcontrol" "$( sshcontrol-patch "$A_keygrip" )"
+    #$GPG -K --with-keygrip "<$ADMIN_EMAIL>" \
+    #    | egrep '^(sec|ssb|[ ]*Keygrip)' | tr '\n' '*' \
+    #    | sed 's/\*[ ]*Keygrip/ Keygrip/g' | tr '*' '\n' \
+    #    | grep '^ssb[ ]*rsa2048[ ]*....-..-..[ ]*\[A\]' | sed 's/^.* Keygrip = //' \
+    #    > "$GNUPG_SSHCTL"
+    set +x
+
+    # -- Disable Gnome keyring ------------------------------------------------
+    if [ -f /etc/xdg/autostart/gnome-keyring-ssh.desktop ]; then
+        jinxh2 "Disabling Gnome keyring..."
+        set -x
+        jinxpatch --sudo /etc/xdg/autostart/gnome-keyring-ssh.desktop "$(gnome-keyring-patch)"
+        set +x
+    fi
+
+    # -- Disable ssh-agent at X11 startup -------------------------------------
+    if [ -f /etc/xdg/autostart/gnome-keyring-ssh.desktop ]; then
+        jinxh2 "Disabling ssh-agent at X11 startup..."
+        set -x
+        jinxpatch --sudo /etc/X11/Xsession.options "$(Xsession-options-patch)"
+        set +x
+    fi
+
+    # -- Launch gpg-agent at X11 startup --------------------------------------
+    if [ -f "$HOME/.xsession" ]; then
+        jinxh2 "Launching gpg-agent at X11 startup..."
+        set -x
+        jinxpatch"$HOME/.xsession" "$(xsession-patch)"
+        set +x
+    fi
+
+    # -- Launch gpg-agent on shell login --------------------------------------
+    jinxh2 "Launching gpg-agent on shell login..."
+    jinx-update-section "$HOME/.bash_profile" "launch gpg-agent" <<'EOF'
+# Initialize SSH_AUTH_SOCK and launch gpg-agent on login
+export SSH_AUTH_SOCK=$(gpgconf --list-dirs agent-ssh-socket)
+export PINENTRY_USER_DATA="USE_CURSES=1"
+gpgconf --launch gpg-agent
+source ~/.bashrc
+EOF
+    jinx-update-section "$HOME/.bashrc" "launch gpg-agent" <<'EOF'
+export GPG_TTY=$(tty)
+gpg-connect-agent updatestartup`tty` /bye > /dev/null
+EOF
+
+    # -- Declare gpg-agent to ssh ---------------------------------------------
+    jinxh2 "Declaring gpg-agent to ssh..."
+    set -x
+    jinxpatch "$HOME/.ssh/config" "$(ssh-config-patch)"
+    set +x
+
+    trap - ERR
+}
+
+
+# == Do it ====================================================================
+
+main "$@"
