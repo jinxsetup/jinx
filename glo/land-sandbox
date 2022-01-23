@@ -17,4 +17,14 @@ fi
 jinxroot=$(dirname ${BASH_SOURCE})
 if [ "${jinxroot:0:1}" != "/" ]; then jinxroot="${PWD}/${jinxroot}"; fi
 jinxroot=$( sed 's|^\(.*\)/[^/]*$|\1|' <<< "$jinxroot" )
-source "$jinxroot/bin/setenv" "$jinxroot/glo/jinx.json"
+
+"$jinxroot/bin/jinx-upgrade-ubuntu" || return 1
+
+source "$jinxroot/bin/setenv" "$jinxroot/glo/jinx.json" || return 1
+
+"$JINX_ROOT"/bin/jinx-deploy-firewall || return 1
+"$JINX_ROOT"/bin/jinx-deploy-authent || return 1
+source "$JINX_ROOT"/bin/jinx-deploy-authent || return 1
+"$JINX_ROOT"/bin/jinx-deploy-git || return 1
+"$JINX_ROOT"/bin/jinx-deploy-powerline || return 1
+source "$JINX_ROOT"/bin/jinx-deploy-powerline || return 1
