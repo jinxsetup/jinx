@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# hashssh (c) by Frederic Ruget (fred@atlant.is)
+# 
+# This work is licensed under a
+# Creative Commons Attribution 4.0 International License.
+# 
+# You should have received a copy of the license along with this
+# work. If not, see <http://creativecommons.org/licenses/by/4.0/>.
+
+
+# == Check we are correctly invoked ===========================================
+
+if [ "${0}" != "${BASH_SOURCE}" ]; then
+  echo "Script $(basename "$BASH_SOURCE") is not meant to be sourced"
+  return 1
+fi
+
+# See https://security.stackexchange.com/questions/56268/ssh-benefits-of-using-hashed-known-hosts
+
+main () {
+    # .. Arguments ............................................................
+    local hostname="$1"
+
+    # .. Body .................................................................
+    # Compute left part of hash (40-hex-digit random salt)
+    local salt=$( head -c20 < /dev/urandom | xxd -p )
+    # Compute right part of hash
+    local hash=$( echo -n "$1" | openssl sha1 -mac HMAC -macopt hexkey:$salt \
+        | awk '{print $2}' )
+    # Return full hash
+    echo -n "|1|"
+    echo -n "$salt" | xxd -r -p | base64 -w 0
+    echo -n "|"
+    echo -n "$hash" | xxd -r -p | base64 -w 0
+    echo -n " "
+}
+
+main "$@"
