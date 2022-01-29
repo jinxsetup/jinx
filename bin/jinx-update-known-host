@@ -119,14 +119,32 @@ EOF
         local fqdn=$( jinxglo |  jq -r .hosts[$hostidx].fqdn )
 
         # -- Remove subhost from ~/.ssh/known_hosts ---------------------------
-        if [ -f ~/.ssh/known_hosts ]; then
+        if [ -f "$HOME/.ssh/known_hosts" ]; then
             jinxnotice "Removing $subhost from ~/.ssh/known_hosts..."
-            ssh-keygen -q -R "$fqdn" > /dev/null
-            if [ "$subhost" != "$fqdn" ]; then
-                ssh-keygen -q -R "$subhost" > /dev/null
-            fi
+            local line
+            cat "$HOME/.ssh/known_hosts" | \
+                while read line; do
+                    if [ "${line::3}" = "|1|" ]; then 
+                        local hash="$( echo "$line" | sed 's/^|1|[^|]*|\([^ ]*\) .*/\1/' | base64 -d | xxd -p )"
+                        local salt="$( echo "$line" | sed 's/^|1|\([^|]*\)|.*/\1/' | base64 -d | xxd -p )"
+                        local hashedhost="$( echo -n "$subhost" \
+                            | openssl sha1 -mac HMAC -macopt hexkey:$salt \
+                            | awk '{print $2}' )"
+                        local hashedfqdn="$( echo -n "$fqdn" \
+                            | openssl sha1 -mac HMAC -macopt hexkey:$salt \
+                            | awk '{print $2}' )"
+                        if [ "$hash" = "$hashedhost" ]; then continue; fi
+                        if [ "$hash" = "$hashedfqdn" ]; then continue; fi
+                        echo "$line"
+                    else
+                        if echo "$line" | grep -q "$subhost"; then continue; fi
+                        if echo "$line" | grep -q "$fqdn"; then continue; fi
+                        echo "$line"
+                    fi
+                done \
+                | sponge "$HOME/.ssh/known_hosts"
         else
-            ( umask 022 && touch ~/.ssh/known_hosts )
+            ( umask 022 && touch "$HOME/.ssh/known_hosts" )
         fi
 
         # -- Add keys for subhost to ~/.ssh/known_hosts -----------------------
